@@ -365,7 +365,7 @@ namespace Minio
         /// <param name="etags">Etags</param>
         /// <param name="cancellationToken">Optional cancellation token to cancel the operation</param>
         /// <returns></returns>
-        private async Task CompleteMultipartUploadAsync(string bucketName, string objectName, string uploadId, Dictionary<int, string> etags, CancellationToken cancellationToken)
+        internal async Task CompleteMultipartUploadAsync(string bucketName, string objectName, string uploadId, Dictionary<int, string> etags, CancellationToken cancellationToken)
         {
             var request = await this.CreateRequest(Method.POST, bucketName,
                                                      objectName: objectName)
@@ -398,7 +398,7 @@ namespace Minio
         /// <param name="uploadId"></param>
         /// <param name="cancellationToken">Optional cancellation token to cancel the operation</param>
         /// <returns></returns>
-        private IObservable<Part> ListParts(string bucketName, string objectName, string uploadId, CancellationToken cancellationToken)
+        internal IObservable<Part> ListParts(string bucketName, string objectName, string uploadId, CancellationToken cancellationToken)
         {
             return Observable.Create<Part>(
               async obs =>
@@ -470,7 +470,7 @@ namespace Minio
         /// <param name="sseHeaders"> Server-side encryption options</param>
         /// <param name="cancellationToken">Optional cancellation token to cancel the operation</param>
         /// <returns></returns>
-        private async Task<string> NewMultipartUploadAsync(string bucketName, string objectName, Dictionary<string, string> metaData, Dictionary<string, string> sseHeaders, CancellationToken cancellationToken = default(CancellationToken))
+        internal async Task<string> NewMultipartUploadAsync(string bucketName, string objectName, Dictionary<string, string> metaData, Dictionary<string, string> sseHeaders, CancellationToken cancellationToken = default(CancellationToken))
         {
 
             foreach (KeyValuePair<string, string> kv in sseHeaders)
@@ -493,6 +493,46 @@ namespace Minio
         }
 
         /// <summary>
+        /// Prepare request for Put object
+        /// </summary>
+        /// <param name="bucketName">Bucket Name</param>
+        /// <param name="objectName">Object Name</param>
+        /// <param name="uploadId"></param>
+        /// <param name="partNumber"></param>
+        /// <param name="metaData"></param>
+        /// <param name="sseHeaders">Server-side encryption headers if any </param>
+        /// <returns>Prepared request without a body</returns>
+        private async Task<RestRequest> CreatePutObjectRequestAsync(string bucketName, string objectName, string uploadId, int partNumber,
+            Dictionary<string, string> metaData, Dictionary<string, string> sseHeaders)
+        {
+            // For multi-part upload requests, metadata needs to be passed in the NewMultiPartUpload request
+            if (uploadId != null)
+            {
+                metaData = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (sseHeaders != null)
+            {
+                foreach (KeyValuePair<string, string> kv in sseHeaders)
+                {
+                    metaData.Add(kv.Key, kv.Value);
+                }
+            }
+
+            var request = await this.CreateRequest(Method.PUT, bucketName,
+                                                     objectName: objectName,
+                                                     headerMap: metaData)
+                                    .ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(uploadId) && partNumber > 0)
+            {
+                request.AddQueryParameter("uploadId",$"{uploadId}");
+                request.AddQueryParameter("partNumber",$"{partNumber}");
+            }
+
+            return request;
+        }
+
+        /// <summary>
         /// Upload object part to bucket for particular uploadId
         /// </summary>
         /// <param name="bucketName">Bucket Name</param>
@@ -503,30 +543,16 @@ namespace Minio
         /// <param name="metaData"></param>
         /// <param name="sseHeaders">Server-side encryption headers if any </param>
         /// <param name="cancellationToken">Optional cancellation token to cancel the operation</param>
-        /// <returns></returns>
+        /// <returns>etag</returns>
         private async Task<string> PutObjectAsync(string bucketName, string objectName, string uploadId, int partNumber, byte[] data, Dictionary<string, string> metaData, Dictionary<string, string> sseHeaders, CancellationToken cancellationToken)
         {
-            // For multi-part upload requests, metadata needs to be passed in the NewMultiPartUpload request
-            string contentType = metaData["Content-Type"];
-            if (uploadId != null)
-            {
-                metaData = new Dictionary<string, string>();
-            }
+            var request = await CreatePutObjectRequestAsync(bucketName, objectName, uploadId, partNumber, metaData, sseHeaders)
+                .ConfigureAwait(false);
 
-            foreach (KeyValuePair<string, string> kv in sseHeaders)
+            if (data != null)
             {
-                metaData.Add(kv.Key, kv.Value);
-            }
-            var request = await this.CreateRequest(Method.PUT, bucketName,
-                                                     objectName: objectName,
-                                                     contentType: contentType,
-                                                     headerMap: metaData,
-                                                     body: data)
-                                    .ConfigureAwait(false);
-            if (!string.IsNullOrEmpty(uploadId) && partNumber > 0)
-            {
-                request.AddQueryParameter("uploadId",$"{uploadId}");
-                request.AddQueryParameter("partNumber",$"{partNumber}");
+                string contentType = metaData["Content-Type"];
+                request.AddParameter(contentType, data, RestSharp.ParameterType.RequestBody);
             }
 
             var response = await this.ExecuteTaskAsync(this.NoErrorHandlers, request, cancellationToken).ConfigureAwait(false);
@@ -540,6 +566,29 @@ namespace Minio
                 }
             }
             return etag;
+        }
+
+        /// <summary>
+        /// Presigned Put Part url -returns a presigned url to upload an object part without credentials. URL can have a maximum expiry of
+        /// upto 7 days or a minimum of 1 second.
+        /// </summary>
+        /// <param name="bucketName">Bucket to retrieve object from</param>
+        /// <param name="objectName">Key of object to retrieve</param>
+        /// <param name="partNumber"></param>
+        /// <param name="expiresInt">Expiration time in seconds</param>
+        /// <param name="uploadId"></param>
+        /// <param name="reqDate"> Optional request date and time in UTC</param>
+        /// <returns></returns>
+        internal async Task<string> PresignedUploadPartAsync(string bucketName, string objectName, string uploadId, int partNumber, int expiresInt, DateTime? reqDate = null)
+        {
+            if (!utils.IsValidExpiry(expiresInt))
+            {
+                throw new InvalidExpiryRangeException("expiry range should be between 1 and " + Constants.DefaultExpiryTime.ToString());
+            }
+
+            var request = await this.CreatePutObjectRequestAsync(bucketName, objectName, uploadId, partNumber, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), null)
+                .ConfigureAwait(false);
+            return this.authenticator.PresignURL(this.restClient, request, expiresInt, Region, this.SessionToken, reqDate);
         }
 
         /// <summary>
@@ -681,7 +730,7 @@ namespace Minio
         /// <param name="uploadId"></param>
         /// <param name="cancellationToken">Optional cancellation token to cancel the operation</param>
         /// <returns></returns>
-        private async Task RemoveUploadAsync(string bucketName, string objectName, string uploadId, CancellationToken cancellationToken)
+        internal async Task RemoveUploadAsync(string bucketName, string objectName, string uploadId, CancellationToken cancellationToken)
         {
             var request = await this.CreateRequest(Method.DELETE, bucketName,
                                                      objectName: objectName)
@@ -1188,6 +1237,28 @@ namespace Minio
             }
             var request = await this.CreateRequest(Method.PUT, bucketName, objectName: objectName).ConfigureAwait(false);
             return this.authenticator.PresignURL(this.restClient, request, expiresInt, Region, this.SessionToken);
+        }
+
+        /// <summary>
+        /// Presigned Put url -returns a presigned url to upload an object without credentials. URL can have a maximum expiry of
+        /// up to 7 days or a minimum of 1 second.
+        /// </summary>
+        /// <param name="bucketName">Bucket to retrieve object from</param>
+        /// <param name="objectName">Key of object to retrieve</param>
+        /// <param name="headerMap">headerMap. can be <c>null</c>.</param>
+        /// <param name="contentType">Content Type. will be <c>application/octet-stream</c> if <c>null</c>.</param>
+        /// <param name="expiresInt">Expiration time in seconds</param>
+        /// <param name="reqDate"> Optional request date and time in UTC</param>
+        /// <returns></returns>
+        internal async Task<string> PresignedPutObjectAsync(string bucketName, string objectName, Dictionary<string, string> headerMap, string contentType, int expiresInt, DateTime? reqDate = null)
+        {
+            if (!utils.IsValidExpiry(expiresInt))
+            {
+                throw new InvalidExpiryRangeException("expiry range should be between 1 and " + Constants.DefaultExpiryTime.ToString());
+            }
+            var request = await this.CreateRequest(Method.PUT, bucketName, objectName: objectName, headerMap, contentType ?? "application/octet-stream")
+                .ConfigureAwait(false);
+            return this.authenticator.PresignURL(this.restClient, request, expiresInt, Region, this.SessionToken, reqDate);
         }
 
         /// <summary>
