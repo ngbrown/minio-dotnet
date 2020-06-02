@@ -36,6 +36,8 @@ namespace Minio
 {
     public partial class MinioClient
     {
+        public MinioClientAdvanced Advanced { get; }
+
         // Save Credentials from user
         internal string AccessKey { get; private set; }
         internal string SecretKey { get; private set; }
@@ -333,6 +335,8 @@ namespace Minio
             this.defaultServerTransferPartSize = config.DefaultServerTransferPartSize;
             // Instantiate a region cache
             this.regionCache = BucketRegionCache.Instance;
+
+            this.Advanced = new MinioClientAdvanced(this);
 
             this.InitClient();
         }
